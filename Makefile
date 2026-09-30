@@ -14,7 +14,7 @@ SOURCES := source
 
 INCLUDES := include
 
-ARCH := -march=armv5te -mtune=arm946e-s
+ARCH := -march=armv5te -mtune=arm946e -mthumb
 
 CFLAGS := -g -Wall -O2 -ffunction-sections -fdata-sections $(ARCH)
 
@@ -29,6 +29,7 @@ LDFLAGS := -specs=ds_arm9.specs -g $(ARCH)
 LIBS := -lnds9
 
 LIBDIRS := $(LIBNDS)
+
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 
 export OUTPUT := $(CURDIR)/$(TARGET)
@@ -52,6 +53,9 @@ export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
                   -I$(CURDIR)/$(BUILD)
 
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+
+export LD := $(CC)
+
 .PHONY: $(BUILD) clean
 
 $(BUILD):
