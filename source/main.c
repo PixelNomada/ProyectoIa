@@ -136,7 +136,7 @@ int main(void)
         pantallaInferior,
         texto
     );
-    while (pmMainLoop())
+    while (1)
     {
         int tecla;
 
