@@ -1,108 +1,250 @@
 #include <nds.h>
+#include <dswifi9.h>
 #include <stdio.h>
 #include <string.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
-#define MAX_TEXTO 80
-#define MAX_VISIBLE 7
-#define MAX_MENSAJES_RAM 100
+#define MAX_CONTACTS 10
+#define MAX_MSG 10
 
-typedef struct
-{
-    char autor[16];
-    char texto[MAX_TEXTO];
-} Mensaje;
+// Estados de la app
+enum {
+    STATE_SETUP_NAME,
+    STATE_CONTACTS,
+    STATE_ADD_FRIEND,
+    STATE_CHAT,
+    STATE_SETTINGS
+};
 
-Mensaje mensajes[MAX_MENSAJES_RAM];
+int state = STATE_SETUP_NAME;
 
-int cantidadMensajes = 0;
-int desplazamiento = 0;
+char my_name[16] = "";
+char my_code[8] = "";
+char server_ip[32] = "192.168.1.99";
+int server_port = 7777;
+int sock = -1;
+bool connected = false;
 
-static void agregarMensaje(const char *autor, const char *texto)
-{
-    int i;
+// Contactos
+char contacts[MAX_CONTACTS][16];
+int contact_count = 0;
+int selected_contact = -1;
 
-    if (cantidadMensajes < MAX_MENSAJES_RAM)
-    {
-        strcpy(mensajes[cantidadMensajes].autor, autor);
-        strcpy(mensajes[cantidadMensajes].texto, texto);
+// Chat actual
+char chatlog[MAX_MSG][50];
+int chat_count = 0;
 
-        cantidadMensajes++;
+char input[40] = {0};
+int input_pos = 0;
+
+// ---------- Funciones de dibujo ----------
+
+void clear_screens(void) {
+    consoleClear();
+}
+
+void draw_header(const char* title) {
+    printf("\x1b[0;0H========================\n");
+    printf("  %s\n", title);
+    printf("========================\n\n");
+}
+
+void draw_setup_name(void) {
+    clear_screens();
+    draw_header("DS CHAT - Configurar");
+    printf("Escribe tu nombre:\n\n");
+    printf("> %s\n\n", input);
+    printf("ENTER = Continuar\n");
+}
+
+void draw_contacts(void) {
+    clear_screens();
+    draw_header("DS CHAT");
+    printf("Tu codigo: %s\n", my_code);
+    printf("Nombre: %s\n\n", my_name);
+    printf("CONTACTOS:\n");
+
+    if (contact_count == 0) {
+        printf("  (ninguno)\n");
+    } else {
+        for (int i = 0; i < contact_count; i++) {
+            printf("  %d. %s\n", i + 1, contacts[i]);
+        }
     }
-    else
-    {
-        for (i = 0; i < MAX_MENSAJES_RAM - 1; i++)
-        {
-            mensajes[i] = mensajes[i + 1];
+
+    printf("\n");
+    printf("A = Agregar amigo\n");
+    printf("1-9 = Chatear\n");
+    printf("Y = Ajustes\n");
+}
+
+void draw_add_friend(void) {
+    clear_screens();
+    draw_header("Agregar amigo");
+    printf("Escribe el codigo:\n\n");
+    printf("> %s\n\n", input);
+    printf("ENTER = Agregar\n");
+    printf("B = Volver\n");
+}
+
+void draw_chat(void) {
+    clear_screens();
+    printf("\x1b[0;0HChat con: %s\n", contacts[selected_contact]);
+    printf("------------------------\n");
+
+    for (int i = 0; i < chat_count; i++) {
+        printf("%s\n", chatlog[i]);
+    }
+
+    printf("\n\x1b[22;0HEscribir: %s", input);
+}
+
+// ---------- Red ----------
+
+void add_chat_msg(const char* text) {
+    if (chat_count >= MAX_MSG) {
+        for (int i = 0; i < MAX_MSG - 1; i++)
+            strcpy(chatlog[i], chatlog[i + 1]);
+        chat_count = MAX_MSG - 1;
+    }
+
+    strncpy(chatlog[chat_count], text, 49);
+    chatlog[chat_count][49] = 0;
+    chat_count++;
+}
+
+bool connect_server(void) {
+    if (!Wifi_InitDefault(WFC_CONNECT)) {
+        return false;
+    }
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return false;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(server_port);
+    sa.sin_addr.s_addr = inet_addr(server_ip);
+
+    if (connect(sock, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        close(sock);
+        sock = -1;
+        return false;
+    }
+
+    // Login
+    char buf[64];
+    snprintf(buf, sizeof(buf), "LOGIN|%s\n", my_name);
+    send(sock, buf, strlen(buf), 0);
+
+    connected = true;
+    return true;
+}
+
+void receive_messages(void) {
+    if (sock < 0) return;
+
+    char buf[128];
+
+    int len = recv(
+        sock,
+        buf,
+        sizeof(buf) - 1,
+        MSG_DONTWAIT
+    );
+
+    if (len <= 0) return;
+
+    buf[len] = 0;
+
+    char* p = strchr(buf, '\n');
+    if (p) *p = 0;
+
+    if (strncmp(buf, "CODE|", 5) == 0) {
+
+        strncpy(my_code, buf + 5, 7);
+        my_code[7] = 0;
+
+    }
+    else if (strncmp(buf, "ADDED|", 6) == 0) {
+
+        // ADDED|Nombre
+        if (contact_count < MAX_CONTACTS) {
+
+            strncpy(
+                contacts[contact_count],
+                buf + 6,
+                15
+            );
+
+            contacts[contact_count][15] = 0;
+            contact_count++;
         }
 
-        strcpy(mensajes[MAX_MENSAJES_RAM - 1].autor, autor);
-        strcpy(mensajes[MAX_MENSAJES_RAM - 1].texto, texto);
     }
+    else if (strncmp(buf, "MSG|", 4) == 0) {
 
-    if (cantidadMensajes > MAX_VISIBLE)
-        desplazamiento = cantidadMensajes - MAX_VISIBLE;
-    else
-        desplazamiento = 0;
-}
-static void mostrarConversacion(PrintConsole *pantalla)
-{
-    int i;
-    int final;
+        // MSG|De|Texto
+        char* from = buf + 4;
 
-    consoleSelect(pantalla);
-    consoleClear();
+        char* text = strchr(from, '|');
 
-    printf("          DSi IA CHAT\n");
-    printf("------------------------------\n");
+        if (text) {
 
-    if (cantidadMensajes == 0)
-    {
-        printf("\n");
-        printf("   No hay mensajes.\n");
-        return;
+            *text = 0;
+            text++;
+
+            char line[50];
+
+            snprintf(
+                line,
+                sizeof(line),
+                "%s: %s",
+                from,
+                text
+            );
+
+            add_chat_msg(line);
+
+            if (state == STATE_CHAT)
+                draw_chat();
+        }
+
     }
+    else if (strncmp(buf, "ERR|", 4) == 0) {
 
-    final = desplazamiento + MAX_VISIBLE;
-
-    if (final > cantidadMensajes)
-        final = cantidadMensajes;
-
-    for (i = desplazamiento; i < final; i++)
-    {
-        printf("%s:\n", mensajes[i].autor);
-        printf("%s\n", mensajes[i].texto);
-        printf("------------------------------\n");
+        add_chat_msg(buf + 4);
     }
 }
 
-static void mostrarEntrada(
-    PrintConsole *pantalla,
-    const char *texto)
-{
-    consoleSelect(pantalla);
-    consoleClear();
+// ---------- Main ----------
 
-    printf("        ESCRIBIR MENSAJE\n");
-    printf("------------------------------\n\n");
-    printf("> %s\n", texto);
-    printf("\n\n");
-    printf("ENTER = ENVIAR\n");
-    printf("B = SALIR\n");
-}
-int main(void)
-{
-    PrintConsole *pantallaSuperior;
-    PrintConsole *pantallaInferior;
+int main(void) {
 
-    char texto[MAX_TEXTO];
-    int posicion = 0;
+    videoSetMode(MODE_0_2D);
 
-    pantallaSuperior = consoleDemoInit();
+    vramSetBankA(VRAM_A_MAIN_BG);
+
+    consoleInit(
+        NULL,
+        0,
+        BgType_Text4bpp,
+        BgSize_T_256x256,
+        31,
+        0,
+        true,
+        true
+    );
 
     videoSetModeSub(MODE_0_2D);
+
     vramSetBankC(VRAM_C_SUB_BG);
 
-    pantallaInferior = consoleInit(
+    consoleInit(
         NULL,
         0,
         BgType_Text4bpp,
@@ -113,104 +255,262 @@ int main(void)
         true
     );
 
-    consoleSelect(pantallaInferior);
-
     keyboardDemoInit();
     keyboardShow();
 
-    agregarMensaje(
-        "DSi IA",
-        "Hola! Bienvenido a DSi IA Chat."
-    );
+    draw_setup_name();
 
-    agregarMensaje(
-        "DSi IA",
-        "Escribe un mensaje abajo."
-    );
-
-    mostrarConversacion(pantallaSuperior);
-
-    memset(texto, 0, sizeof(texto));
-
-    mostrarEntrada(
-        pantallaInferior,
-        texto
-    );
-    while (1)
-    {
-        int tecla;
+    while (1) {
 
         swiWaitForVBlank();
+
         scanKeys();
 
-        if (keysDown() & KEY_B)
-            break;
+        u16 keys = keysDown();
 
-        tecla = keyboardUpdate();
+        receive_messages();
 
-        if (tecla == -1)
-            continue;
+        int key = keyboardUpdate();
 
-        if (tecla == DVK_ENTER)
-        {
-            if (posicion > 0)
-            {
-                texto[posicion] = '\0';
+        // ===== ESTADO: Poner nombre =====
 
-                agregarMensaje("TU", texto);
+        if (state == STATE_SETUP_NAME) {
 
-                agregarMensaje(
-                    "CHAT",
-                    "Mensaje recibido."
-                );
+            if (key == DVK_ENTER && input_pos > 0) {
 
-                memset(texto, 0, sizeof(texto));
-                posicion = 0;
+                strncpy(my_name, input, 15);
+                my_name[15] = 0;
 
-                mostrarConversacion(
-                    pantallaSuperior
-                );
+                input_pos = 0;
+                memset(input, 0, sizeof(input));
 
-                mostrarEntrada(
-                    pantallaInferior,
-                    texto
-                );
+                if (connect_server()) {
+
+                    state = STATE_CONTACTS;
+                    draw_contacts();
+
+                } else {
+
+                    printf("\nError de conexion\n");
+                }
             }
 
-            continue;
-        }
+            else if (
+                key == DVK_BACKSPACE &&
+                input_pos > 0
+            ) {
 
-        if (tecla == DVK_BACKSPACE)
-        {
-            if (posicion > 0)
-            {
-                posicion--;
-                texto[posicion] = '\0';
+                input[--input_pos] = 0;
 
-                mostrarEntrada(
-                    pantallaInferior,
-                    texto
-                );
+                draw_setup_name();
             }
 
-            continue;
+            else if (
+                key >= 32 &&
+                key < 127 &&
+                input_pos < 12
+            ) {
+
+                input[input_pos++] = key;
+                input[input_pos] = 0;
+
+                draw_setup_name();
+            }
         }
 
-        if (tecla >= 32 && tecla <= 126)
-        {
-            if (posicion < MAX_TEXTO - 1)
-            {
-                texto[posicion] = (char)tecla;
-                posicion++;
-                texto[posicion] = '\0';
+        // ===== ESTADO: Lista de contactos =====
 
-                mostrarEntrada(
-                    pantallaInferior,
-                    texto
+        else if (state == STATE_CONTACTS) {
+
+            if (keys & KEY_A) {
+
+                state = STATE_ADD_FRIEND;
+
+                input_pos = 0;
+                memset(input, 0, sizeof(input));
+
+                draw_add_friend();
+
+            }
+
+            else if (keys & KEY_Y) {
+
+                // Por ahora no hacemos nada extra
+
+            }
+
+            else if (keys >= KEY_1 && keys <= KEY_9) {
+
+                int num = -1;
+
+                if (keys & KEY_1) num = 0;
+                if (keys & KEY_2) num = 1;
+                if (keys & KEY_3) num = 2;
+                if (keys & KEY_4) num = 3;
+                if (keys & KEY_5) num = 4;
+                if (keys & KEY_6) num = 5;
+                if (keys & KEY_7) num = 6;
+                if (keys & KEY_8) num = 7;
+                if (keys & KEY_9) num = 8;
+
+                if (
+                    num >= 0 &&
+                    num < contact_count
+                ) {
+
+                    selected_contact = num;
+
+                    chat_count = 0;
+
+                    state = STATE_CHAT;
+
+                    input_pos = 0;
+                    memset(input, 0, sizeof(input));
+
+                    draw_chat();
+                }
+            }
+        }
+
+        // ===== ESTADO: Agregar amigo =====
+
+        else if (state == STATE_ADD_FRIEND) {
+
+            if (
+                key == DVK_ENTER &&
+                input_pos > 0
+            ) {
+
+                char buf[32];
+
+                snprintf(
+                    buf,
+                    sizeof(buf),
+                    "ADD|%s\n",
+                    input
                 );
+
+                send(
+                    sock,
+                    buf,
+                    strlen(buf),
+                    0
+                );
+
+                input_pos = 0;
+                memset(input, 0, sizeof(input));
+
+                state = STATE_CONTACTS;
+
+                draw_contacts();
+            }
+
+            else if (
+                key == DVK_BACKSPACE &&
+                input_pos > 0
+            ) {
+
+                input[--input_pos] = 0;
+
+                draw_add_friend();
+            }
+
+            else if (
+                key >= 32 &&
+                key < 127 &&
+                input_pos < 8
+            ) {
+
+                input[input_pos++] = key;
+                input[input_pos] = 0;
+
+                draw_add_friend();
+            }
+
+            if (keys & KEY_B) {
+
+                state = STATE_CONTACTS;
+
+                draw_contacts();
+            }
+        }
+
+        // ===== ESTADO: Chat =====
+
+        else if (state == STATE_CHAT) {
+
+            if (
+                key == DVK_ENTER &&
+                input_pos > 0
+            ) {
+
+                char packet[80];
+
+                snprintf(
+                    packet,
+                    sizeof(packet),
+                    "PRIV|%s|%s\n",
+                    contacts[selected_contact],
+                    input
+                );
+
+                send(
+                    sock,
+                    packet,
+                    strlen(packet),
+                    0
+                );
+
+                char line[50];
+
+                snprintf(
+                    line,
+                    sizeof(line),
+                    "TU: %s",
+                    input
+                );
+
+                add_chat_msg(line);
+
+                input_pos = 0;
+                memset(input, 0, sizeof(input));
+
+                draw_chat();
+            }
+
+            else if (
+                key == DVK_BACKSPACE &&
+                input_pos > 0
+            ) {
+
+                input[--input_pos] = 0;
+
+                draw_chat();
+            }
+
+            else if (
+                key >= 32 &&
+                key < 127 &&
+                input_pos < 30
+            ) {
+
+                input[input_pos++] = key;
+                input[input_pos] = 0;
+
+                draw_chat();
+            }
+
+            if (keys & KEY_B) {
+
+                state = STATE_CONTACTS;
+
+                draw_contacts();
             }
         }
     }
+
+    if (sock >= 0)
+        close(sock);
 
     return 0;
 }
